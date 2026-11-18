@@ -11,12 +11,12 @@ import { VIEWER_LOGIN, errorReply, jsonReply, type Reply } from './shared.ts';
 // global (Relay) ids: base64 of `Type:repoId[:number]`, opaque and stable across reads
 // ---------------------------------------------------------------------------------------------
 
-function gid(type: string, repoId: number, number?: number): string {
+function encodeId(type: string, repoId: number, number?: number): string {
   const payload = number === undefined ? `${type}:${repoId}` : `${type}:${repoId}:${number}`;
   return Buffer.from(payload, 'utf8').toString('base64');
 }
 
-function decodeGid(id: unknown): { type: string; repoId: number; number?: number } | null {
+function decodeId(id: unknown): { type: string; repoId: number; number?: number } | null {
   if (typeof id !== 'string' || id === '') return null;
   let payload: string;
   try {
@@ -32,7 +32,7 @@ function decodeGid(id: unknown): { type: string; repoId: number; number?: number
   return { type: parts[0], repoId, number };
 }
 
-function repoById(id: number): Repo | undefined {
+function findRepoById(id: number): Repo | undefined {
   return allRepos().find((repo) => repo.id === id);
 }
 
@@ -355,7 +355,7 @@ function resolveValue(value: Value, variables: Record<string, unknown>): unknown
   return value;
 }
 
-function unknownField(field: string, type: string): string {
+function fieldError(field: string, type: string): string {
   return `Cannot query field "${field}" on type "${type}".`;
 }
 
@@ -368,15 +368,15 @@ function typeMatches(condition: string, value: unknown): boolean {
   return value !== null && typeof value === 'object' && (value as Node).__type === condition;
 }
 
-function issueNode(repo: Repo, issue: Issue): Node {
+function makeIssueNode(repo: Repo, issue: Issue): Node {
   return { __type: 'Issue', repo, issue };
 }
 
-function pullNode(repo: Repo, pull: Pull): Node {
+function makePullNode(repo: Repo, pull: Pull): Node {
   return { __type: 'PullRequest', repo, pull };
 }
 
-function mergeableOf(repo: Repo, pull: Pull): string {
+function mergeableState(repo: Repo, pull: Pull): string {
   if (pull.merged) return 'MERGEABLE';
   const baseTip = repo.refs.get(`refs/heads/${pull.base}`);
   const headTip = repo.refs.get(`refs/heads/${pull.head}`);
@@ -384,7 +384,7 @@ function mergeableOf(repo: Repo, pull: Pull): string {
   return isAncestorOf(repo, baseTip, headTip) ? 'MERGEABLE' : 'CONFLICTING';
 }
 
-function __typeNode(name: unknown): Node | null {
+function introspectType(name: unknown): Node | null {
   if (typeof name !== 'string') return null;
   const meta = SCHEMA[name];
   if (!meta) return null;
@@ -414,17 +414,17 @@ function resolveField(
         return ok(repo ? { __type: 'Repository', repo } : null);
       }
       case 'node': {
-        const decoded = decodeGid(argValues.id);
+        const decoded = decodeId(argValues.id);
         if (decoded && decoded.type === 'Repository') {
-          const repo = repoById(decoded.repoId);
+          const repo = findRepoById(decoded.repoId);
           return ok(repo ? { __type: 'Repository', repo } : null);
         }
         return ok(null);
       }
       case '__type':
-        return ok(__typeNode(argValues.name));
+        return ok(introspectType(argValues.name));
       default:
-        return err(unknownField(fieldName, 'Query'));
+        return err(fieldError(fieldName, 'Query'));
     }
   }
 
@@ -433,8 +433,8 @@ function resolveField(
       case 'createIssue': {
         const input = argValues.input;
         const repositoryId = input && typeof input === 'object' ? (input as Record<string, unknown>).repositoryId : undefined;
-        const decoded = decodeGid(repositoryId);
-        const repo = decoded && decoded.type === 'Repository' ? repoById(decoded.repoId) : undefined;
+        const decoded = decodeId(repositoryId);
+        const repo = decoded && decoded.type === 'Repository' ? findRepoById(decoded.repoId) : undefined;
         if (!repo) return err('createIssue: unknown repository');
         const number = nextIssueNumber(repo);
         const title = (input as Record<string, unknown>)?.title;
@@ -445,8 +445,8 @@ function resolveField(
       }
       case 'closeIssue': {
         const input = argValues.input as Record<string, unknown> | undefined;
-        const decoded = decodeGid(input?.issueId);
-        const repo = decoded && decoded.type === 'Issue' ? repoById(decoded.repoId) : undefined;
+        const decoded = decodeId(input?.issueId);
+        const repo = decoded && decoded.type === 'Issue' ? findRepoById(decoded.repoId) : undefined;
         const issue = repo && decoded?.number !== undefined ? repo.issues.get(decoded.number) : undefined;
         if (!repo || !issue) return err('closeIssue: unknown issue');
         issue.state = 'closed';
@@ -454,8 +454,8 @@ function resolveField(
       }
       case 'createPullRequest': {
         const input = argValues.input as Record<string, unknown> | undefined;
-        const decoded = decodeGid(input?.repositoryId);
-        const repo = decoded && decoded.type === 'Repository' ? repoById(decoded.repoId) : undefined;
+        const decoded = decodeId(input?.repositoryId);
+        const repo = decoded && decoded.type === 'Repository' ? findRepoById(decoded.repoId) : undefined;
         if (!repo) return err('createPullRequest: unknown repository');
         const headRefName = input?.headRefName;
         const baseRefName = input?.baseRefName;
@@ -467,8 +467,8 @@ function resolveField(
       }
       case 'mergePullRequest': {
         const input = argValues.input as Record<string, unknown> | undefined;
-        const decoded = decodeGid(input?.pullRequestId);
-        const repo = decoded && decoded.type === 'PullRequest' ? repoById(decoded.repoId) : undefined;
+        const decoded = decodeId(input?.pullRequestId);
+        const repo = decoded && decoded.type === 'PullRequest' ? findRepoById(decoded.repoId) : undefined;
         if (!repo || decoded?.number === undefined) return err('mergePullRequest: unknown pull request');
         const merged = mergePullRepo(repo, decoded.number);
         if (!merged) return err('mergePullRequest: pull request is not mergeable');
@@ -477,8 +477,8 @@ function resolveField(
       }
       case 'addComment': {
         const input = argValues.input as Record<string, unknown> | undefined;
-        const decoded = decodeGid(input?.subjectId);
-        const repo = decoded && decoded.type === 'Issue' ? repoById(decoded.repoId) : undefined;
+        const decoded = decodeId(input?.subjectId);
+        const repo = decoded && decoded.type === 'Issue' ? findRepoById(decoded.repoId) : undefined;
         const issue = repo && decoded?.number !== undefined ? repo.issues.get(decoded.number) : undefined;
         if (!repo || !issue) return err('addComment: unknown issue');
         const id = nextCommentId(repo);
@@ -488,41 +488,41 @@ function resolveField(
         return ok({ __type: 'AddCommentPayload', node });
       }
       default:
-        return err(unknownField(fieldName, 'Mutation'));
+        return err(fieldError(fieldName, 'Mutation'));
     }
   }
 
   if (typeName === 'Viewer') {
     if (fieldName === 'login') return ok(parent?.login);
-    return err(unknownField(fieldName, 'Viewer'));
+    return err(fieldError(fieldName, 'Viewer'));
   }
 
   if (typeName === 'User') {
     if (fieldName === 'login') return ok(parent?.login);
-    return err(unknownField(fieldName, 'User'));
+    return err(fieldError(fieldName, 'User'));
   }
 
   if (typeName === '__Type') {
     if (fieldName === 'fields') return ok((parent?.fields as string[]).map((name) => ({ __type: '__Field', name })));
     if (fieldName === 'enumValues') return ok((parent?.enumValues as string[]).map((name) => ({ __type: '__EnumValue', name })));
-    return err(unknownField(fieldName, '__Type'));
+    return err(fieldError(fieldName, '__Type'));
   }
 
   if (typeName === '__Field' || typeName === '__EnumValue') {
     if (fieldName === 'name') return ok(parent?.name);
-    return err(unknownField(fieldName, typeName));
+    return err(fieldError(fieldName, typeName));
   }
 
   if (typeName === 'Ref') {
     if (fieldName === 'name') return ok(parent?.name);
-    return err(unknownField(fieldName, 'Ref'));
+    return err(fieldError(fieldName, 'Ref'));
   }
 
   if (typeName === 'Repository') {
     const repo = parent!.repo as Repo;
     switch (fieldName) {
       case 'id':
-        return ok(gid('Repository', repo.id));
+        return ok(encodeId('Repository', repo.id));
       case 'databaseId':
         return ok(repo.id);
       case 'name':
@@ -540,7 +540,7 @@ function resolveField(
       case 'issue': {
         const number = argValues.number;
         const issue = typeof number === 'number' ? repo.issues.get(number) : undefined;
-        return ok(issue ? issueNode(repo, issue) : null);
+        return ok(issue ? makeIssueNode(repo, issue) : null);
       }
       case 'issues': {
         const first = typeof argValues.first === 'number' && argValues.first > 0 ? argValues.first : undefined;
@@ -559,7 +559,7 @@ function resolveField(
         const sliced = first === undefined ? issues : issues.slice(0, first);
         return ok({
           __type: 'IssueConnection',
-          nodes: sliced.map((issue) => issueNode(repo, issue)),
+          nodes: sliced.map((issue) => makeIssueNode(repo, issue)),
           hasNextPage: sliced.length < total,
           endCursor: sliced.length > 0 ? String(sliced[sliced.length - 1].number) : null,
         });
@@ -568,15 +568,15 @@ function resolveField(
         const first = typeof argValues.first === 'number' && argValues.first > 0 ? argValues.first : undefined;
         const pulls = [...repo.pulls.values()].sort((a, b) => b.number - a.number);
         const sliced = first === undefined ? pulls : pulls.slice(0, first);
-        return ok({ __type: 'PullRequestConnection', nodes: sliced.map((pull) => pullNode(repo, pull)) });
+        return ok({ __type: 'PullRequestConnection', nodes: sliced.map((pull) => makePullNode(repo, pull)) });
       }
       case 'pullRequest': {
         const number = argValues.number;
         const pull = typeof number === 'number' ? repo.pulls.get(number) : undefined;
-        return ok(pull ? pullNode(repo, pull) : null);
+        return ok(pull ? makePullNode(repo, pull) : null);
       }
       default:
-        return err(unknownField(fieldName, 'Repository'));
+        return err(fieldError(fieldName, 'Repository'));
     }
   }
 
@@ -585,7 +585,7 @@ function resolveField(
     const issue = parent!.issue as Issue;
     switch (fieldName) {
       case 'id':
-        return ok(gid('Issue', repo.id, issue.number));
+        return ok(encodeId('Issue', repo.id, issue.number));
       case 'number':
         return ok(issue.number);
       case 'title':
@@ -595,20 +595,20 @@ function resolveField(
       case 'body':
         return ok(issue.body);
       default:
-        return err(unknownField(fieldName, 'Issue'));
+        return err(fieldError(fieldName, 'Issue'));
     }
   }
 
   if (typeName === 'IssueConnection') {
     if (fieldName === 'nodes') return ok(parent?.nodes);
     if (fieldName === 'pageInfo') return ok({ __type: 'PageInfo', hasNextPage: parent?.hasNextPage, endCursor: parent?.endCursor });
-    return err(unknownField(fieldName, 'IssueConnection'));
+    return err(fieldError(fieldName, 'IssueConnection'));
   }
 
   if (typeName === 'PageInfo') {
     if (fieldName === 'hasNextPage') return ok(parent?.hasNextPage);
     if (fieldName === 'endCursor') return ok(parent?.endCursor);
-    return err(unknownField(fieldName, 'PageInfo'));
+    return err(fieldError(fieldName, 'PageInfo'));
   }
 
   if (typeName === 'PullRequest') {
@@ -616,7 +616,7 @@ function resolveField(
     const pull = parent!.pull as Pull;
     switch (fieldName) {
       case 'id':
-        return ok(gid('PullRequest', repo.id, pull.number));
+        return ok(encodeId('PullRequest', repo.id, pull.number));
       case 'number':
         return ok(pull.number);
       case 'state':
@@ -628,7 +628,7 @@ function resolveField(
       case 'baseRefName':
         return ok(pull.base);
       case 'mergeable':
-        return ok(mergeableOf(repo, pull));
+        return ok(mergeableState(repo, pull));
       case 'files': {
         const baseTip = repo.refs.get(`refs/heads/${pull.base}`);
         const headTip = repo.refs.get(`refs/heads/${pull.head}`);
@@ -636,52 +636,52 @@ function resolveField(
         return ok({ __type: 'PullRequestFileConnection', nodes: paths.map((path) => ({ __type: 'PullRequestChangedFile', path })) });
       }
       default:
-        return err(unknownField(fieldName, 'PullRequest'));
+        return err(fieldError(fieldName, 'PullRequest'));
     }
   }
 
   if (typeName === 'PullRequestConnection') {
     if (fieldName === 'nodes') return ok(parent?.nodes);
-    return err(unknownField(fieldName, 'PullRequestConnection'));
+    return err(fieldError(fieldName, 'PullRequestConnection'));
   }
 
   if (typeName === 'PullRequestFileConnection') {
     if (fieldName === 'nodes') return ok(parent?.nodes);
-    return err(unknownField(fieldName, 'PullRequestFileConnection'));
+    return err(fieldError(fieldName, 'PullRequestFileConnection'));
   }
 
   if (typeName === 'PullRequestChangedFile') {
     if (fieldName === 'path') return ok(parent?.path);
-    return err(unknownField(fieldName, 'PullRequestChangedFile'));
+    return err(fieldError(fieldName, 'PullRequestChangedFile'));
   }
 
   if (typeName === 'CreateIssuePayload' || typeName === 'CloseIssuePayload') {
-    if (fieldName === 'issue') return ok(issueNode(parent!.repo as Repo, parent!.issue as Issue));
-    return err(unknownField(fieldName, typeName));
+    if (fieldName === 'issue') return ok(makeIssueNode(parent!.repo as Repo, parent!.issue as Issue));
+    return err(fieldError(fieldName, typeName));
   }
 
   if (typeName === 'CreatePullRequestPayload' || typeName === 'MergePullRequestPayload') {
-    if (fieldName === 'pullRequest') return ok(pullNode(parent!.repo as Repo, parent!.pull as Pull));
-    return err(unknownField(fieldName, typeName));
+    if (fieldName === 'pullRequest') return ok(makePullNode(parent!.repo as Repo, parent!.pull as Pull));
+    return err(fieldError(fieldName, typeName));
   }
 
   if (typeName === 'AddCommentPayload') {
     if (fieldName === 'commentEdge') return ok({ __type: 'IssueCommentEdge', node: parent?.node });
-    return err(unknownField(fieldName, 'AddCommentPayload'));
+    return err(fieldError(fieldName, 'AddCommentPayload'));
   }
 
   if (typeName === 'IssueCommentEdge') {
     if (fieldName === 'node') return ok(parent?.node);
-    return err(unknownField(fieldName, 'IssueCommentEdge'));
+    return err(fieldError(fieldName, 'IssueCommentEdge'));
   }
 
   if (typeName === 'IssueComment') {
-    if (fieldName === 'id') return ok(gid('IssueComment', (parent!.repo as Repo).id, parent!.number as number));
+    if (fieldName === 'id') return ok(encodeId('IssueComment', (parent!.repo as Repo).id, parent!.number as number));
     if (fieldName === 'body') return ok(parent?.body);
-    return err(unknownField(fieldName, 'IssueComment'));
+    return err(fieldError(fieldName, 'IssueComment'));
   }
 
-  return err(unknownField(fieldName, typeName));
+  return err(fieldError(fieldName, typeName));
 }
 
 function executeSelectionSet(selections: Selection[], typeName: string, parent: Node | null, variables: Record<string, unknown>, errors: Array<{ message: string }>): Record<string, unknown> {
@@ -720,7 +720,7 @@ function executeSelectionSet(selections: Selection[], typeName: string, parent: 
 // entry point
 // ---------------------------------------------------------------------------------------------
 
-function executeOne(operation: unknown): { data: Record<string, unknown> | null; errors: Array<{ message: string }> } {
+function runOperation(operation: unknown): { data: Record<string, unknown> | null; errors: Array<{ message: string }> } {
   if (operation === null || typeof operation !== 'object' || typeof (operation as Record<string, unknown>).query !== 'string') {
     return { data: null, errors: [{ message: 'a GraphQL request needs a query string' }] };
   }
@@ -747,7 +747,7 @@ export function handleGraphql(bodyText: string): Reply {
     return errorReply(400, 'Problems parsing JSON');
   }
   if (Array.isArray(parsed)) {
-    return jsonReply(200, parsed.map(executeOne));
+    return jsonReply(200, parsed.map(runOperation));
   }
-  return jsonReply(200, executeOne(parsed));
+  return jsonReply(200, runOperation(parsed));
 }
