@@ -218,6 +218,16 @@ export function diffTrees(
       diffTrees(repo, base!.oid, head!.oid, path, out);
       continue;
     }
+    if (headIsDir) {
+      // A directory added on the head side: walk it, every entry below is a new file.
+      diffTrees(repo, '', head!.oid, path, out);
+      continue;
+    }
+    if (baseIsDir) {
+      // A directory removed on the head side: every entry below is a removed file.
+      diffTrees(repo, base!.oid, '', path, out);
+      continue;
+    }
     if (base === undefined) {
       const additions = blobLineCount(repo, head!.oid);
       out.push({ filename: path, status: 'added', additions, deletions: 0, changes: additions });
