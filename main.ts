@@ -35,15 +35,17 @@ const RETRY_MAX_MS = 2_000;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The wait after `attempt` failed requests: exponential from RETRY_INITIAL_MS, capped. */
+/** The wait after `attempt` failed requests: exponential from RETRY_INITIAL_MS, capped at RETRY_MAX_MS. */
 function backoffDelay(attempt: number): number {
+  // The exponent is pinned at 8, so the doubling stops growing after eight retries and only the
+  // outer cap matters from there on.
   return Math.min(RETRY_MAX_MS, RETRY_INITIAL_MS * 2 ** Math.min(attempt, 8));
 }
 
 /**
  * POST the bound port until the env accepts it. 200 is the normal answer; 409 means a first register
- * already won, which is not this process's to fix. 400 and 405 are contract errors and end the program;
- * a network error or another status is retried, since the env may still be starting.
+ * already won, which is not this process's to fix. 400 and 405 are contract errors and abort the
+ * program; a network error or any other status is retried, since the env may still be starting.
  */
 async function register(port: number): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
@@ -57,6 +59,8 @@ async function register(port: number): Promise<void> {
       if (res.status === 200 || res.status === 409) return;
       if (res.status === 400 || res.status === 405) throw new Error(`register answered HTTP ${res.status}: ${await res.text()}`);
     } catch (err) {
+      // Only contract errors escape the loop; every other failure (network, timeout, 5xx) falls
+      // through to the backoff below and retries.
       if (err instanceof Error && err.message.startsWith('register answered HTTP ')) throw err;
     }
     await wait(backoffDelay(attempt));
