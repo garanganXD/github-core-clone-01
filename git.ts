@@ -1,6 +1,7 @@
 // git.ts — the object model, pkt-line framing and packfile codec, built on node:zlib + node:crypto
-// only (no git binary, no dependencies). Everything the smart-HTTP layer and the REST contents
-// endpoints need to build, read and traverse a repository's object database.
+// only (no git binary, no third-party code). This is the shared vocabulary every other layer uses to
+// build, store, traverse and stream a repository's object database: the smart-HTTP server, the REST
+// contents endpoints and the store's object maps all key off the oids produced here.
 
 import { createHash } from 'node:crypto';
 import { deflateSync, inflateSync } from 'node:zlib';
@@ -14,6 +15,7 @@ export interface GitObject {
 
 export const ZERO_OID = '0000000000000000000000000000000000000000';
 
+/** Packfile type codes 1..4 and their reverse lookup. */
 const TYPE_CODE: Record<GitObjectType, number> = { commit: 1, tree: 2, blob: 3, tag: 4 };
 const CODE_TYPE: Record<number, GitObjectType> = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
 
@@ -23,7 +25,7 @@ export function isObjectId(value: string): boolean {
   return HEX40.test(value);
 }
 
-/** git's object id: SHA-1 over `<type> <size>\0` + the object bytes. */
+/** git's object id: SHA-1 over `<type> <size>\0` followed by the object bytes. */
 export function hashObject(type: GitObjectType, data: Uint8Array): string {
   const body = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const hash = createHash('sha1');
@@ -33,7 +35,7 @@ export function hashObject(type: GitObjectType, data: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------------------------
-// pkt-line
+// pkt-line framing
 // ---------------------------------------------------------------------------------------------
 
 const PKT_LINE_MAX = 65520; // 0xfff0, the largest representable length
@@ -132,14 +134,15 @@ export function parseTree(data: Uint8Array): TreeEntry[] {
   return entries;
 }
 
-function compareTreeNames(a: TreeEntry, b: TreeEntry): number {
+/** git's tree sort: a directory (mode 40000) compares as its name plus a trailing slash. */
+function orderTreeEntries(a: TreeEntry, b: TreeEntry): number {
   const left = Buffer.from(a.mode === '40000' ? `${a.name}/` : a.name, 'utf8');
   const right = Buffer.from(b.mode === '40000' ? `${b.name}/` : b.name, 'utf8');
   return Buffer.compare(left, right);
 }
 
 export function buildTree(entries: ReadonlyArray<TreeEntry>): Buffer {
-  const sorted = [...entries].sort(compareTreeNames);
+  const sorted = [...entries].sort(orderTreeEntries);
   const parts: Buffer[] = [];
   for (const entry of sorted) {
     parts.push(Buffer.from(`${entry.mode} ${entry.name}\0`, 'utf8'));
@@ -275,7 +278,7 @@ export function collectReachable(roots: Iterable<string>, lookup: ObjectLookup):
   return seen;
 }
 
-/** True when `ancestor` is on the parent chain of `descendant`. */
+/** True when `ancestor` sits on the parent chain of `descendant`. */
 export function isAncestor(ancestor: string, descendant: string, lookup: ObjectLookup): boolean {
   const seen = new Set<string>();
   const stack = [descendant];
@@ -317,18 +320,18 @@ export interface PackObject {
   oid: string;
 }
 
+/** The variable-length entry header: type code in the high bits, size in the low bits. */
 function packObjectHeader(type: GitObjectType, size: number): Buffer {
-  const code = TYPE_CODE[type];
   const bytes: number[] = [];
-  let remaining = size;
-  let first = (code << 4) | (remaining & 0x0f);
-  remaining = Math.floor(remaining / 16);
-  while (remaining > 0) {
-    bytes.push(first | 0x80);
-    first = remaining & 0x7f;
-    remaining = Math.floor(remaining / 128);
+  let rest = size;
+  let word = (TYPE_CODE[type] << 4) | (rest & 0x0f);
+  rest = Math.floor(rest / 16);
+  while (rest > 0) {
+    bytes.push(word | 0x80);
+    word = rest & 0x7f;
+    rest = Math.floor(rest / 128);
   }
-  bytes.push(first);
+  bytes.push(word);
   return Buffer.from(bytes);
 }
 
@@ -358,6 +361,7 @@ export interface PackReadResult {
   trailerOk: boolean;
 }
 
+/** Read a little-endian 7-bit-per-byte varint starting at `start`, returning the first byte too. */
 function readSizeVarint(buffer: Buffer, start: number): { size: number; next: number; first: number } {
   let byte = buffer[start];
   const first = byte;
@@ -372,6 +376,7 @@ function readSizeVarint(buffer: Buffer, start: number): { size: number; next: nu
   return { size, next: offset, first };
 }
 
+/** Read an offset-delta base (its own biased varint). */
 function readOfsBase(buffer: Buffer, start: number): { baseOffset: number; next: number } {
   let byte = buffer[start];
   let offset = start + 1;
@@ -383,6 +388,7 @@ function readOfsBase(buffer: Buffer, start: number): { baseOffset: number; next:
   return { baseOffset: value, next: offset };
 }
 
+/** Inflate one zlib stream at `offset`, reporting how many compressed bytes were consumed. */
 function inflateAt(buffer: Buffer, offset: number): { data: Buffer; next: number } {
   const result = inflateSync(buffer.subarray(offset), { info: true }) as unknown as {
     buffer: Buffer;
@@ -392,6 +398,7 @@ function inflateAt(buffer: Buffer, offset: number): { data: Buffer; next: number
   return { data: result.buffer, next: offset + written };
 }
 
+/** Rebuild `base`+`delta` per the git delta format. */
 function applyDelta(base: Buffer, delta: Buffer): Buffer {
   let offset = 0;
   const readSize = (): number => {
