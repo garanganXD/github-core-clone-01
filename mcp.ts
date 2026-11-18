@@ -1,8 +1,9 @@
 // mcp.ts — Model Context Protocol (Streamable HTTP) behind POST /mcp. JSON-RPC 2.0 over plain JSON
-// bodies (the 2026-07-28 revision's `server/discover` handshake, `tools/list` and `tools/call`), resolving
-// against the same in-memory store as REST, GraphQL and git so every surface reads the same objects.
+// bodies (the 2026-07-28 revision's `server/discover` handshake, `tools/list` and `tools/call`),
+// resolving against the same in-memory store as REST, GraphQL and git so every surface reads the
+// same objects.
 
-import { createRepo, getRepo, nextIssueNumber, nextPullNumber, type Repo } from './store.ts';
+import { createRepo, getRepo, nextIssueNumber, type Repo } from './store.ts';
 import { createPull, mergePullRepo } from './rest.ts';
 import { VIEWER_LOGIN, jsonReply, type Reply } from './shared.ts';
 
@@ -88,7 +89,7 @@ interface ToolOutcome {
   structured?: Record<string, unknown>;
 }
 
-function repoObject(repo: Repo): Record<string, unknown> {
+function repoPayload(repo: Repo): Record<string, unknown> {
   return {
     id: repo.id,
     name: repo.name,
@@ -100,80 +101,80 @@ function repoObject(repo: Repo): Record<string, unknown> {
   };
 }
 
-function issueObject(repo: Repo, issue: { number: number; title: string; body: string; state: 'open' | 'closed' }): Record<string, unknown> {
+function issuePayload(issue: { number: number; title: string; body: string; state: 'open' | 'closed' }): Record<string, unknown> {
   return { number: issue.number, title: issue.title, body: issue.body, state: issue.state };
 }
 
-function runTool(name: string, args: Record<string, unknown>): ToolOutcome {
+function invokeTool(name: string, args: Record<string, unknown>): ToolOutcome {
   const fail = (message: string): ToolOutcome => ({ isError: true, text: message });
-  const asString = (value: unknown): string | undefined => (typeof value === 'string' && value !== '' ? value : undefined);
+  const nonEmptyString = (value: unknown): string | undefined => (typeof value === 'string' && value !== '' ? value : undefined);
 
   switch (name) {
     case 'create_repo': {
-      const repoName = asString(args.name);
+      const repoName = nonEmptyString(args.name);
       if (repoName === undefined) return fail('create_repo requires a name');
-      const owner = asString(args.owner) ?? VIEWER_LOGIN;
+      const owner = nonEmptyString(args.owner) ?? VIEWER_LOGIN;
       if (getRepo(owner, repoName) !== undefined) return fail(`repository ${owner}/${repoName} already exists`);
-      const description = asString(args.description) ?? '';
+      const description = nonEmptyString(args.description) ?? '';
       const repo = createRepo(owner, repoName, description, args.private === true);
-      const structured = repoObject(repo);
+      const structured = repoPayload(repo);
       return { isError: false, text: JSON.stringify(structured), structured };
     }
     case 'get_repo': {
-      const owner = asString(args.owner);
-      const repoName = asString(args.repo);
+      const owner = nonEmptyString(args.owner);
+      const repoName = nonEmptyString(args.repo);
       if (owner === undefined || repoName === undefined) return fail('get_repo requires owner and repo');
       const repo = getRepo(owner, repoName);
       if (repo === undefined) return fail(`repository ${owner}/${repoName} not found`);
-      const structured = repoObject(repo);
+      const structured = repoPayload(repo);
       return { isError: false, text: JSON.stringify(structured), structured };
     }
     case 'create_issue': {
-      const owner = asString(args.owner);
-      const repoName = asString(args.repo);
-      const title = asString(args.title);
+      const owner = nonEmptyString(args.owner);
+      const repoName = nonEmptyString(args.repo);
+      const title = nonEmptyString(args.title);
       if (owner === undefined || repoName === undefined || title === undefined) return fail('create_issue requires owner, repo and title');
       const repo = getRepo(owner, repoName);
       if (repo === undefined) return fail(`repository ${owner}/${repoName} not found`);
       const number = nextIssueNumber(repo);
-      const body = asString(args.body) ?? '';
+      const body = nonEmptyString(args.body) ?? '';
       repo.issues.set(number, { number, title, body, state: 'open', labels: [], comments: [] });
       const structured = { number, title, body, state: 'open' };
       return { isError: false, text: JSON.stringify(structured), structured };
     }
     case 'list_issues': {
-      const owner = asString(args.owner);
-      const repoName = asString(args.repo);
+      const owner = nonEmptyString(args.owner);
+      const repoName = nonEmptyString(args.repo);
       if (owner === undefined || repoName === undefined) return fail('list_issues requires owner and repo');
       const repo = getRepo(owner, repoName);
       if (repo === undefined) return fail(`repository ${owner}/${repoName} not found`);
-      const state = asString(args.state);
+      const state = nonEmptyString(args.state);
       const issues = [...repo.issues.values()]
         .filter((issue) => state === undefined || state === 'all' || issue.state === state)
         .sort((a, b) => b.number - a.number)
-        .map((issue) => issueObject(repo, issue));
+        .map(issuePayload);
       const structured = { issues };
       return { isError: false, text: JSON.stringify(structured), structured };
     }
     case 'create_pull_request': {
-      const owner = asString(args.owner);
-      const repoName = asString(args.repo);
-      const title = asString(args.title);
-      const head = asString(args.head);
-      const base = asString(args.base);
+      const owner = nonEmptyString(args.owner);
+      const repoName = nonEmptyString(args.repo);
+      const title = nonEmptyString(args.title);
+      const head = nonEmptyString(args.head);
+      const base = nonEmptyString(args.base);
       if (owner === undefined || repoName === undefined || title === undefined || head === undefined || base === undefined) {
         return fail('create_pull_request requires owner, repo, title, head and base');
       }
       const repo = getRepo(owner, repoName);
       if (repo === undefined) return fail(`repository ${owner}/${repoName} not found`);
-      const pull = createPull(repo, head, base, title, asString(args.body) ?? '');
-      if (pull === null) return fail(`head or base branch not found`);
+      const pull = createPull(repo, head, base, title, nonEmptyString(args.body) ?? '');
+      if (pull === null) return fail('head or base branch not found');
       const structured = { number: pull.number, title: pull.title, head: pull.head, base: pull.base, state: 'open' };
       return { isError: false, text: JSON.stringify(structured), structured };
     }
     case 'merge_pull_request': {
-      const owner = asString(args.owner);
-      const repoName = asString(args.repo);
+      const owner = nonEmptyString(args.owner);
+      const repoName = nonEmptyString(args.repo);
       const number = typeof args.pull_number === 'number' && Number.isInteger(args.pull_number) ? args.pull_number : undefined;
       if (owner === undefined || repoName === undefined || number === undefined) return fail('merge_pull_request requires owner, repo and pull_number');
       const repo = getRepo(owner, repoName);
@@ -233,7 +234,7 @@ export function handleMcp(bodyText: string): Reply {
     if (tool === undefined) {
       return jsonReply(200, { jsonrpc: '2.0', id, error: { code: -32602, message: `Unknown tool: ${name}` } });
     }
-    const outcome = runTool(name, args);
+    const outcome = invokeTool(name, args);
     if (outcome.isError) {
       return jsonReply(200, { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: outcome.text }], isError: true } });
     }
