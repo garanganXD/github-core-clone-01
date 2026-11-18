@@ -1,16 +1,18 @@
-// The entry <-> env lifecycle, as env/src/wire.ts settles it: bind an ephemeral port, tell the env the
-// port it bound, then poll until the env says the trial is over and exit 0. Keep this file as it is:
-// the suite scores the server app.ts builds, and the lifecycle is the harness's, not the contest's.
+// The forge process's boot-and-wait loop, matched to the harness's wire.ts contract: grab an ephemeral
+// port, announce it to the env, then poll until the env reports the trial finished and quit cleanly.
+// Leave the code below alone — it is the harness's lifecycle, not the forge's, and app.ts holds
+// everything the suite actually grades.
 //
-//   1. MAKEFUN_ENV_URL names the env's origin (http://store:8080 in a trial container). Without it
-//      there is nothing to talk to, so the program exits 1 at once.
-//   2. Create the server and listen(0): the kernel picks a free port. Never bind 8080 — the env owns it.
-//   3. POST $MAKEFUN_ENV_URL/register {"port": N}. The env records the address the request came from
-//      plus N as your base URL and dials it from then on. The first register wins; a 409 means another
-//      entry already registered, and this process keeps waiting like any other.
-//   4. GET $MAKEFUN_ENV_URL/done until the body is {"done": true}. The env answers at once ({"done":
-//      false} while the suite runs), so this is a poll, not a long-held request. A failed or slow poll
-//      is retried with a short exponential backoff; the process never exits before the env says done.
+//   1. MAKEFUN_ENV_URL is the env's origin (http://store:8080 inside a trial container). With it unset
+//      there is no one to talk to, so the process exits 1 immediately.
+//   2. Build the server and listen(0) so the kernel chooses a free port. Never bind 8080: the env owns it.
+//   3. POST $MAKEFUN_ENV_URL/register {"port": N}. The env stores the caller's address plus N as this
+//      entry's base URL and dials it from then on. The first register wins; a 409 means some other
+//      entry registered first, and this process simply keeps waiting like any other.
+//   4. GET $MAKEFUN_ENV_URL/done until the answer is {"done": true}. The env replies right away
+//      ({"done": false} while the suite is still running), so this is a poll rather than a held-open
+//      request. A slow or failed poll retries with a short exponential backoff; the process never
+//      exits before the env says it is done.
 //   5. Close the server and exit 0. The harness then stops the env, which writes the export the scorer
 //      reads.
 //
