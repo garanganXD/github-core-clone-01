@@ -124,7 +124,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
     const restPath = path.slice('/api/v3'.length);
     const body = method === 'GET' || method === 'HEAD' ? Buffer.alloc(0) : await readBody(req);
-    const reply = handleRest(method, restPath, query, body);
+    const origin = (() => { try { return new URL(req.url ?? '/', `http://${req.headers.host ?? 'entry'}`).origin; } catch { return undefined; } })();
+    const reply = handleRest(method, restPath, query, body, origin);
     if (reply === null) {
       sendNotFound(res);
       return;

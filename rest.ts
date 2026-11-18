@@ -263,7 +263,7 @@ export function changedPaths(repo: Repo, baseTip: string, headTip: string): stri
   return files.map((file) => file.filename);
 }
 
-export function handleRest(method: string, path: string, query: URLSearchParams, body: Buffer): Reply | null {
+export function handleRest(method: string, path: string, query: URLSearchParams, body: Buffer, baseUrl?: string): Reply | null {
   const segments = path === '' || path === '/' ? [] : path.split('/').filter((segment) => segment !== '');
 
   if (segments.length === 0) {
@@ -280,7 +280,7 @@ export function handleRest(method: string, path: string, query: URLSearchParams,
   }
 
   if (segments[0] === 'user' && segments[1] === 'repos') {
-    if (method === 'GET') return listRepos(query);
+    if (method === 'GET') return listRepos(query, baseUrl);
     if (method === 'POST') return createRepoRoute(body);
     return null;
   }
@@ -346,7 +346,7 @@ export function handleRest(method: string, path: string, query: URLSearchParams,
 // repos
 // ---------------------------------------------------------------------------------------------
 
-function listRepos(query: URLSearchParams): Reply {
+function listRepos(query: URLSearchParams, baseUrl?: string): Reply {
   const perPage = Number.parseInt(query.get('per_page') ?? '30', 10) || 30;
   const page = Number.parseInt(query.get('page') ?? '1', 10) || 1;
   const repos = reposForOwner(VIEWER_LOGIN);
@@ -354,7 +354,8 @@ function listRepos(query: URLSearchParams): Reply {
   const slice = repos.slice(start, start + perPage);
   const headers: Record<string, string> = {};
   if (start + slice.length < repos.length) {
-    const base = query.has('per_page') ? `?page=${page + 1}&per_page=${perPage}` : `?page=${page + 1}`;
+    const suffix = query.has('per_page') ? `?page=${page + 1}&per_page=${perPage}` : `?page=${page + 1}`;
+    const base = baseUrl ? `${baseUrl.replace(/\/$/, '')}/api/v3/user/repos${suffix}` : suffix;
     headers['Link'] = `<${base}>; rel="next"`;
   }
   return jsonReply(200, slice.map(repoJson), headers);
