@@ -1,0 +1,51 @@
+Build a GitHub-compatible git forge for the github-core-clone-01 bounty. The repo is this directory. Current score of the starter: 15/1000. Target: maximize score. Grading loop available locally:
+
+  cd /home/agentuser/makefun/gh01-kit/github-core-clone-01-kit && node cli/makefun.mjs grade-local --kit . --bot /home/agentuser/ghc1 --driver process
+
+(takes ~2 min, prints scores {feature, agent, perf}. Use it after every milestone. State export must replay byte-for-byte: keep all time out of the state.)
+
+## The surface (all in app.ts, keep main.ts lifecycle untouched, no npm packages — only node builtins)
+
+1. REST v3 under /api/v3 (Bearer token auth from MAKEFUN_SHOP_TOKEN; wrong/missing token = 401; errors = JSON {message}, never HTML; every reply carries X-GitHub-Request-Id header):
+   - GET /api/v3/ → 200 + X-OAuth-Scopes header
+   - GET /api/v3/meta → 200 {installed_version}
+   - GET/POST /api/v3/user/repos, GET/PATCH/DELETE /api/v3/repos/{owner}/{repo}
+   - PUT/GET/DELETE /api/v3/repos/{owner}/{repo}/contents/{path} (201 create, 200 update, 409 stale sha, DELETE returns {commit:{sha}})
+   - POST /api/v3/repos/{owner}/{repo}/labels (201 {name}; label must exist before issue may use it)
+   - POST /api/v3/repos/{owner}/{repo}/issues (201 open issue; 422 unknown label)
+   - POST /api/v3/repos/{owner}/{repo}/pulls (201 open PR with head/base)
+   - GET /api/v3/repos/{owner}/{repo}/pulls/{number}
+   - PUT .../pulls/{number}/merge → 200 {sha, merged:true, message}; 404 unknown; 405 conflicted; squash commit lands on default branch
+   - Pagination: GET /api/v3/user/repos multi-page must link next via Link header rel="next"
+   - unknown route → 404 JSON; malformed JSON body → 400
+2. Git smart HTTP at /{owner}/{repo}.git — THE HARD PART, implement the packfile protocol yourself on node:zlib + node:crypto (NO git binary):
+   - upload-pack must speak protocol v2 (Git-Protocol: version=2 header): v2 capability advertisement + ls-refs + fetch (wants/haves, shallow support)
+   - receive-pack v0 only: advertise report-status, side-band-64k, delete-refs; preamble "# service=git-receive-pack"
+   - missing repo = 404 on info/refs, server stays up
+   - pushes must fast-forward only; mixed push (1 ok ref + 1 refused) answers report-status with one line each
+   - store = your own format (loose zlib objects + refs JSON is fine; sha1 on content)
+3. GraphQL at POST /api/graphql:
+   - unauthenticated = 401 exactly
+   - introspection: __type Issue {id,number,title,state,body}, PullRequest {id,number,headRefName,baseRefName,mergeable,state,merged,files}, Repository {id,databaseId,name,nameWithOwner,owner,defaultBranchRef,viewerPermission,hasIssuesEnabled,issue,issues,pullRequests,pullRequest}; SearchType enumValues include ISSUE
+   - repository.issues orderBy CREATED_AT DESC, ties number DESC; states:[OPEN] omits closed
+   - createPullRequest mutation (repo id + head branch pushed via git)
+   - two operations in one document → two results in order
+   - unknown field → HTTP 200 with errors array; unknown repo → data.repository null, no errors
+4. MCP at POST /mcp (JSON-RPC 2.0, streamable HTTP, JSON or SSE replies, each ≤3s):
+   - revision 2026-07-28 (every request declares it; server/discover → supportedVersions list) or legacy handshake initialize/notifications/initialized with optional Mcp-Session-Id
+   - tools/list: ≥6 tools incl. create_repo, get_repo, create_issue, list_issues, create_pull_request, merge_pull_request (prefix names allowed, suffix-matched case-insensitive); each with non-empty description + inputSchema type object; two tools/list identical byte-for-byte
+   - tools/call args: create_repo {name}, get_repo {owner,repo}, create_issue {owner,repo,title,body?}, list_issues {owner,repo,state?}, create_pull_request {owner,repo,title,head,base}, merge_pull_request {owner,repo,pull_number}
+   - unknown tool → -32602 or -32601 (never HTTP 500); missing required arg → isError:true or -32602; non-JSON body → 400 with -32700; no auth header → 401
+   - same store as REST: objects created via MCP read back via REST with same ids
+
+## Scored: feature 600 (REST+git conformance), agent 200 (MCP), perf 200 (4 workloads: 200 pushes, 50 concurrent shallow clones of 200-commit repo, 2000 issue reads, 200 issue writes — house ref times in program/env/src/calibration.json; perf = clamp(25 - 12.5*log2(t/Tref), 0, 50) per workload). Deterministic: state export byte-for-byte identical across 2 runs (no timestamps in state!). Wall budget 900s.
+
+## Workflow (strict)
+1. Read the kit's RULES.txt fully first (cat /home/agentuser/makefun/gh01-kit/github-core-clone-01-kit/RULES.txt).
+2. Study the suite's checks to know exactly what passes: program/env/src/checks-rest.ts, checks-git.ts, checks-graphql.ts, checks-mcp.ts (in the kit). Build to those checks.
+3. Rewrite app.ts (you may split into more files: store.ts, rest.ts, githttp.ts, graphql.ts, mcp.ts — keep main.ts as-is except you MUST rewrite main.ts's comment header in your own words; every file must be written by your write_file in this session).
+4. node --experimental-strip-types --check each file; run grade-local after each milestone; iterate.
+5. mkdir -p out is NOT needed for this competition. Commit with git (user.name garanganXD, user.email callmeescaa@gmail.com), print ENTRY COMPLETE + summary.
+
+## Pace
+Provider 429s: wait and retry, never give up. Work in this one session. Write ALL code via your own write_file calls — no copying, no pasting from tool results.
