@@ -2,9 +2,9 @@
 // bodies (the 2026-07-28 revision's `server/discover` handshake, `tools/list` and `tools/call`), resolving
 // against the same in-memory store as REST, GraphQL and git so every surface reads the same objects.
 
-import { Repo, createRepo, getRepo, nextIssueNumber, nextPullNumber } from './store.ts';
+import { createRepo, getRepo, nextIssueNumber, nextPullNumber, type Repo } from './store.ts';
 import { createPull, mergePullRepo } from './rest.ts';
-import { Reply, VIEWER_LOGIN, jsonReply } from './shared.ts';
+import { VIEWER_LOGIN, jsonReply, type Reply } from './shared.ts';
 
 const SERVER_INFO = { name: 'github-core-clone-01', version: '1.0.0' };
 

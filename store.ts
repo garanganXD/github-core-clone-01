@@ -2,7 +2,7 @@
 // labels, pull requests and comments. Everything the REST, git, GraphQL and MCP layers share, so an
 // object created through one surface reads back through the others with the same ids.
 
-import { GitObject, ZERO_OID } from './git.ts';
+import { ZERO_OID, type GitObject } from './git.ts';
 
 export interface Label {
   name: string;

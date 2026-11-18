@@ -4,7 +4,6 @@
 // node:zlib + node:crypto, with no git binary anywhere.
 
 import {
-  GitObject,
   ZERO_OID,
   buildTree,
   collectReachable,
@@ -21,8 +20,9 @@ import {
   pktLine,
   readPack,
   writePack,
+  type GitObject,
 } from './git.ts';
-import { Repo, headOid, lookupObject, putObject } from './store.ts';
+import { headOid, lookupObject, putObject, type Repo } from './store.ts';
 
 export interface GitResponse {
   status: number;

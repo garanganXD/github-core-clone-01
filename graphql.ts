@@ -3,9 +3,9 @@
 // arguments, introspection) and resolves them against the same in-memory store as REST and git.
 // Unknown fields surface as a 200 with an `errors` array; unknown repositories answer null.
 
-import { Issue, Pull, Repo, allRepos, getRepo, nextCommentId, nextIssueNumber } from './store.ts';
+import { allRepos, getRepo, nextCommentId, nextIssueNumber, type Issue, type Pull, type Repo } from './store.ts';
 import { changedPaths, createPull, isAncestorOf, mergePullRepo } from './rest.ts';
-import { Reply, VIEWER_LOGIN, errorReply, jsonReply } from './shared.ts';
+import { VIEWER_LOGIN, errorReply, jsonReply, type Reply } from './shared.ts';
 
 // ---------------------------------------------------------------------------------------------
 // global (Relay) ids: base64 of `Type:repoId[:number]`, opaque and stable across reads

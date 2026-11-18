@@ -11,8 +11,6 @@ import {
   parseTree,
 } from './git.ts';
 import {
-  Repo,
-  Pull,
   createRepo,
   deleteRepo,
   getRepo,
@@ -24,8 +22,10 @@ import {
   putObject,
   reposForOwner,
   FIXED_TIME,
+  type Repo,
+  type Pull,
 } from './store.ts';
-import { Reply, VIEWER_LOGIN, b64decode, b64encode, errorReply, jsonReply } from './shared.ts';
+import { VIEWER_LOGIN, b64decode, b64encode, errorReply, jsonReply, type Reply } from './shared.ts';
 
 const SHA40 = /^[0-9a-f]{40}$/;
 
