@@ -1,15 +1,12 @@
-// githttp.ts — the smart-HTTP git server: protocol v2 upload-pack (capability advertisement,
-// ls-refs, fetch with haves and shallow support) and v0 receive-pack (report-status over
-// side-band-64k, fast-forward-only updates, delete-refs). Packfiles are built and read on
-// node:zlib + node:crypto, with no git binary anywhere.
+// githttp.ts — the smart-HTTP git server. It speaks protocol v2 upload-pack (capability
+// advertisement, ls-refs, fetch with haves and shallow support) and v0 receive-pack
+// (report-status over side-band-64k, fast-forward-only updates, delete-refs). Packfiles are built
+// and read on node:zlib + node:crypto — no git binary anywhere.
 
 import {
   ZERO_OID,
-  buildTree,
   collectReachable,
-  hashObject,
   isAncestor,
-  isObjectId,
   parseCommit,
   parsePktLines,
   parseTag,
@@ -22,7 +19,7 @@ import {
   writePack,
   type GitObject,
 } from './git.ts';
-import { headOid, lookupObject, putObject, type Repo } from './store.ts';
+import { lookupObject, putObject, type Repo } from './store.ts';
 
 export interface GitResponse {
   status: number;
@@ -35,7 +32,8 @@ const AGENT = 'github-core-clone-01/1.0';
 const UPLOAD_PACK_CAPS = 'multi_ack_detailed side-band-64k thin-pack ofs-delta shallow no-progress agent';
 const RECEIVE_PACK_CAPS = 'report-status delete-refs side-band-64k ofs-delta agent';
 
-function allRefs(repo: Repo): Array<{ name: string; oid: string }> {
+/** Every advertised ref, heads first then tags (preserving the repo's insertion order). */
+function listRefs(repo: Repo): Array<{ name: string; oid: string }> {
   const heads: Array<{ name: string; oid: string }> = [];
   const tags: Array<{ name: string; oid: string }> = [];
   for (const [name, oid] of repo.refs) {
@@ -45,16 +43,17 @@ function allRefs(repo: Repo): Array<{ name: string; oid: string }> {
   return [...heads, ...tags];
 }
 
-function headRef(repo: Repo): { name: string; oid: string } {
+/** The HEAD ref: the default branch, or the first head, or the zero oid on an empty repo. */
+function defaultHead(repo: Repo): { name: string; oid: string } {
   const branch = `refs/heads/${repo.defaultBranch}`;
   const oid = repo.refs.get(branch);
   if (oid) return { name: branch, oid };
-  const first = allRefs(repo).find((ref) => ref.name.startsWith('refs/heads/'));
+  const first = listRefs(repo).find((ref) => ref.name.startsWith('refs/heads/'));
   return first ?? { name: branch, oid: ZERO_OID };
 }
 
 // ---------------------------------------------------------------------------------------------
-// advertisements
+// capability advertisement
 // ---------------------------------------------------------------------------------------------
 
 function uploadPackCaps(): string {
@@ -67,9 +66,9 @@ function receivePackCaps(): string {
 
 function advertiseV0(repo: Repo, caps: string, peelTags: boolean): Buffer {
   const parts: Buffer[] = [];
-  const head = headRef(repo);
-  const heads = allRefs(repo).filter((ref) => ref.name.startsWith('refs/heads/'));
-  const tags = allRefs(repo).filter((ref) => ref.name.startsWith('refs/tags/'));
+  const head = defaultHead(repo);
+  const heads = listRefs(repo).filter((ref) => ref.name.startsWith('refs/heads/'));
+  const tags = listRefs(repo).filter((ref) => ref.name.startsWith('refs/tags/'));
   const refs: Array<{ name: string; oid: string }> = [];
   if (heads.length) {
     refs.push({ name: 'HEAD', oid: head.oid });
@@ -118,7 +117,7 @@ function advertiseV2(): Buffer {
 // ---------------------------------------------------------------------------------------------
 
 function lsRefsBody(repo: Repo, prefixes: string[], wantPeel: boolean): Buffer {
-  const head = headRef(repo);
+  const head = defaultHead(repo);
   const parts: Buffer[] = [];
   const keep = (name: string): boolean => prefixes.length === 0 || prefixes.some((p) => name.startsWith(p));
   if (prefixes.length === 0) {
@@ -129,7 +128,7 @@ function lsRefsBody(repo: Repo, prefixes: string[], wantPeel: boolean): Buffer {
       parts.push(pktLine(`${headOid} HEAD symref-target:${head.name}\n`));
     }
   }
-  for (const ref of allRefs(repo)) {
+  for (const ref of listRefs(repo)) {
     if (!keep(ref.name)) continue;
     if (ref.name.startsWith('refs/tags/') && wantPeel) {
       const peeled = peelTag(ref.oid, (oid) => lookupObject(repo, oid));
@@ -246,12 +245,12 @@ function planFetch(repo: Repo, wants: string[], haves: string[], shallows: strin
   return { send, shallow, unshallow };
 }
 
-/** Frame the packfile section as side-band-64k packets (band 1), chunked to a legal pkt-line. */
-function sidebandPack(pack: Buffer): Buffer {
+/** Frame a byte stream as side-band-64k packets (band 1), chunked to a legal pkt-line. */
+function sidebandBytes(stream: Buffer): Buffer {
   const parts: Buffer[] = [];
   const chunkSize = 65515;
-  for (let i = 0; i < pack.length; i += chunkSize) {
-    const chunk = pack.subarray(i, Math.min(i + chunkSize, pack.length));
+  for (let i = 0; i < stream.length; i += chunkSize) {
+    const chunk = stream.subarray(i, Math.min(i + chunkSize, stream.length));
     parts.push(pktLine(Buffer.concat([Buffer.from([1]), chunk])));
   }
   return Buffer.concat(parts);
@@ -261,10 +260,12 @@ function sidebandPack(pack: Buffer): Buffer {
 // request handlers
 // ---------------------------------------------------------------------------------------------
 
+function notFound(): GitResponse {
+  return { status: 404, contentType: 'application/json', body: Buffer.from('{"message":"Not Found"}') };
+}
+
 export function handleInfoRefs(repo: Repo | undefined, service: string, gitProtocol: string | null): GitResponse {
-  if (!repo) {
-    return { status: 404, contentType: 'application/json', body: Buffer.from('{"message":"Not Found"}') };
-  }
+  if (!repo) return notFound();
   if (service === 'git-receive-pack') {
     return {
       status: 200,
@@ -281,9 +282,7 @@ export function handleInfoRefs(repo: Repo | undefined, service: string, gitProto
 }
 
 export function handleUploadPack(repo: Repo | undefined, body: Buffer, gitProtocol: string | null): GitResponse {
-  if (!repo) {
-    return { status: 404, contentType: 'application/json', body: Buffer.from('{"message":"Not Found"}') };
-  }
+  if (!repo) return notFound();
   const wantsV2 = gitProtocol?.includes('version=2');
   const result = wantsV2 ? uploadPackV2(repo, body) : uploadPackV0(repo, body);
   return { status: 200, contentType: 'application/x-git-upload-pack-result', body: result };
@@ -295,7 +294,7 @@ function uploadPackV2(repo: Repo, body: Buffer): Buffer {
     packets = parsePktLines(body);
   } catch {
     // A malformed request (the suite posts garbage here): answer an empty, well-formed response.
-    return Buffer.concat([pktLine('packfile\n'), sidebandPack(writePack([])), pktFlush()]);
+    return Buffer.concat([pktLine('packfile\n'), sidebandBytes(writePack([])), pktFlush()]);
   }
   let command = '';
   const wants: string[] = [];
@@ -347,7 +346,7 @@ function uploadPackV2(repo: Repo, body: Buffer): Buffer {
     parts.push(pktDelim());
   }
   parts.push(pktLine('packfile\n'));
-  parts.push(sidebandPack(writePack(plan.send)));
+  parts.push(sidebandBytes(writePack(plan.send)));
   parts.push(pktFlush());
   return Buffer.concat(parts);
 }
@@ -357,18 +356,14 @@ function uploadPackV0(repo: Repo, body: Buffer): Buffer {
   try {
     packets = parsePktLines(body);
   } catch {
-    return Buffer.concat([pktLine('NAK\n'), sidebandPack(writePack([])), pktFlush()]);
+    return Buffer.concat([pktLine('NAK\n'), sidebandBytes(writePack([])), pktFlush()]);
   }
   const wants: string[] = [];
   const haves: string[] = [];
   const shallows: string[] = [];
   let depth: number | null = null;
-  let sawFlush = false;
   for (const packet of packets) {
-    if (packet.kind === 'flush') {
-      sawFlush = true;
-      continue;
-    }
+    if (packet.kind === 'flush') continue;
     if (packet.kind !== 'data') continue;
     const line = packet.payload.toString('utf8').replace(/\n$/, '');
     const space = line.indexOf(' ');
@@ -380,21 +375,19 @@ function uploadPackV0(repo: Repo, body: Buffer): Buffer {
     else if (key === 'shallow') shallows.push(value);
     else if (key === 'deepen') depth = Number.parseInt(value, 10);
   }
-  void sawFlush;
   const plan = planFetch(repo, wants, haves, shallows, depth);
   const parts: Buffer[] = [];
   parts.push(pktLine('NAK\n'));
   for (const oid of plan.shallow) parts.push(pktLine(`shallow ${oid}\n`));
   for (const oid of plan.unshallow) parts.push(pktLine(`unshallow ${oid}\n`));
-  parts.push(sidebandPack(writePack(plan.send)));
+  parts.push(sidebandBytes(writePack(plan.send)));
   parts.push(pktFlush());
   return Buffer.concat(parts);
 }
 
 export function handleReceivePack(repo: Repo | undefined, body: Buffer): GitResponse {
-  if (!repo) {
-    return { status: 404, contentType: 'application/json', body: Buffer.from('{"message":"Not Found"}') };
-  }
+  if (!repo) return notFound();
+
   let packets: ReturnType<typeof parsePktLines>;
   let packBytes: Buffer;
   try {
@@ -412,9 +405,9 @@ export function handleReceivePack(repo: Repo | undefined, body: Buffer): GitResp
     let line = packet.payload.toString('utf8').replace(/\n$/, '');
     const nul = line.indexOf('\0');
     if (nul >= 0) line = line.slice(0, nul);
-    const parts = line.split(' ');
-    if (parts.length < 3) continue;
-    commands.push({ oldOid: parts[0], newOid: parts[1], ref: parts[2] });
+    const fields = line.split(' ');
+    if (fields.length < 3) continue;
+    commands.push({ oldOid: fields[0], newOid: fields[1], ref: fields[2] });
   }
   packBytes = body.subarray(consumed);
 
@@ -474,13 +467,5 @@ function reportBody(unpackStatus: string, reports: Array<{ ref: string; ok: bool
   for (const report of reports) {
     inner.push(report.ok ? pktLine(`ok ${report.ref}\n`) : pktLine(`ng ${report.ref} ${report.reason}\n`));
   }
-  const stream = Buffer.concat(inner);
-  // Wrap the inner pkt-line stream in band-1 sideband packets.
-  const parts: Buffer[] = [];
-  const chunkSize = 65515;
-  for (let i = 0; i < stream.length; i += chunkSize) {
-    const chunk = stream.subarray(i, Math.min(i + chunkSize, stream.length));
-    parts.push(pktLine(Buffer.concat([Buffer.from([1]), chunk])));
-  }
-  return Buffer.concat(parts);
+  return sidebandBytes(Buffer.concat(inner));
 }
