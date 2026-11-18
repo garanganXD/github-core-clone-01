@@ -1,0 +1,24 @@
+Rewrite the core source files of this GitHub-clone forge, exactly as specified. This is the authorship step of a bounty entry.
+
+Workspace: /home/agentuser/ghc1 (git repo, HEAD 13e9117, all tests pass at 983/1000 — do NOT redesign anything).
+
+Your task: rewrite these files IN THIS SESSION, file by file, using the existing files as the specification. For each file below, read the current version, then WRITE A FULL REPLACEMENT with the same behavior, same exports, same routes/logic — cleaned and consolidated. Do not change public behavior at all. Small cleanups are fine (dead code removal, clearer names) but nothing that alters semantics.
+
+Files to rewrite in this order, committing after each one (git user already configured? If not: git -C /home/agentuser/ghc1 -c user.name="garanganXD" -c user.email="callmeescaa@gmail.com" commit ...):
+1. shared.ts
+2. git.ts
+3. store.ts
+4. githttp.ts
+5. rest.ts
+6. graphql.ts
+7. mcp.ts
+8. app.ts
+9. main.ts
+
+Rules:
+- Pace yourself: after each file, sleep ~20-30 seconds before starting the next (avoid rate limits; if you hit HTTP 429, wait 60s and retry the same step).
+- Do not touch TASK.txt, package.json, README.md, or anything under tests/fixtures.
+- After all files: run `node --experimental-strip-types --check` on each rewritten file to confirm syntax, then commit.
+- Do NOT run the grader, do NOT bundle, do NOT submit. Just rewrite + syntax-check + commit.
+
+When done, print REWRITE_DONE and a one-line summary of each file.
