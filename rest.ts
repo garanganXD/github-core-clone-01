@@ -1,20 +1,12 @@
 // rest.ts — GitHub REST v3 under /api/v3. Repositories, branches, commits, contents, labels, issues,
 // comments and pull requests over the same in-memory store every other surface shares. Auth and the
-// X-GitHub-Request-Id header are app.ts's; this module only routes, validates and mutates.
+// X-GitHub-Request-Id header are app.ts's job; this module only routes, validates and mutates.
 
-import {
-  buildCommit,
-  buildTree,
-  hashObject,
-  isObjectId,
-  parseCommit,
-  parseTree,
-} from './git.ts';
+import { buildCommit, buildTree, hashObject, parseCommit, parseTree } from './git.ts';
 import {
   createRepo,
   deleteRepo,
   getRepo,
-  headOid,
   lookupObject,
   nextCommentId,
   nextIssueNumber,
@@ -25,9 +17,10 @@ import {
   type Repo,
   type Pull,
 } from './store.ts';
-import { VIEWER_LOGIN, b64decode, b64encode, errorReply, jsonReply, type Reply } from './shared.ts';
+import { VIEWER_LOGIN, errorReply, jsonReply, type Reply } from './shared.ts';
 
 const SHA40 = /^[0-9a-f]{40}$/;
+const ZERO_HEAD = '0'.repeat(40);
 
 // ---------------------------------------------------------------------------------------------
 // JSON shapes
@@ -85,8 +78,6 @@ function pullJson(repo: Repo, pull: { number: number; title: string; body: strin
   return out;
 }
 
-const ZERO_HEAD = '0'.repeat(40);
-
 // ---------------------------------------------------------------------------------------------
 // git tree helpers (the contents endpoints build commits over these)
 // ---------------------------------------------------------------------------------------------
@@ -97,7 +88,8 @@ export function treeEntries(repo: Repo, treeOid: string): Array<{ mode: string; 
   return [];
 }
 
-function writeTree(repo: Repo, entries: Array<{ mode: string; name: string; oid: string }>): string {
+/** Store a tree and return its oid. */
+function storeTree(repo: Repo, entries: Array<{ mode: string; name: string; oid: string }>): string {
   const data = buildTree(entries);
   const oid = hashObject('tree', data);
   putObject(repo, oid, { type: 'tree', data });
@@ -111,11 +103,11 @@ function branchTree(repo: Repo, branch: string): string {
     const commit = lookupObject(repo, tip);
     if (commit && commit.type === 'commit') return parseCommit(commit.data).tree;
   }
-  return writeTree(repo, []);
+  return storeTree(repo, []);
 }
 
 /** Insert or replace `blobOid` at `segments` below `treeOid`, building intermediate trees. */
-function setPath(repo: Repo, treeOid: string, segments: string[], blobOid: string): string {
+function putAtPath(repo: Repo, treeOid: string, segments: string[], blobOid: string): string {
   const entries = treeEntries(repo, treeOid);
   const head = segments[0];
   const rest = segments.slice(1);
@@ -124,16 +116,16 @@ function setPath(repo: Repo, treeOid: string, segments: string[], blobOid: strin
     if (index >= 0) entries[index] = { mode: '100644', name: head, oid: blobOid };
     else entries.push({ mode: '100644', name: head, oid: blobOid });
   } else {
-    let subtreeOid = index >= 0 && entries[index].mode === '40000' ? entries[index].oid : writeTree(repo, []);
-    const next = setPath(repo, subtreeOid, rest, blobOid);
+    const subtreeOid = index >= 0 && entries[index].mode === '40000' ? entries[index].oid : storeTree(repo, []);
+    const next = putAtPath(repo, subtreeOid, rest, blobOid);
     if (index >= 0) entries[index] = { mode: '40000', name: head, oid: next };
     else entries.push({ mode: '40000', name: head, oid: next });
   }
-  return writeTree(repo, entries);
+  return storeTree(repo, entries);
 }
 
 /** Remove the entry at `segments`; returns the new tree id or null when the path is absent. */
-function deletePath(repo: Repo, treeOid: string, segments: string[]): string | null {
+function removeAtPath(repo: Repo, treeOid: string, segments: string[]): string | null {
   const entries = treeEntries(repo, treeOid);
   const head = segments[0];
   const rest = segments.slice(1);
@@ -141,26 +133,24 @@ function deletePath(repo: Repo, treeOid: string, segments: string[]): string | n
   if (index < 0) return null;
   if (rest.length === 0) {
     entries.splice(index, 1);
-    return writeTree(repo, entries);
+    return storeTree(repo, entries);
   }
   if (entries[index].mode !== '40000') return null;
-  const next = deletePath(repo, entries[index].oid, rest);
+  const next = removeAtPath(repo, entries[index].oid, rest);
   if (next === null) return null;
   entries[index] = { mode: '40000', name: head, oid: next };
-  return writeTree(repo, entries);
+  return storeTree(repo, entries);
 }
 
 /** Read the entry at `segments` below `treeOid`. */
-function readPath(repo: Repo, treeOid: string, segments: string[]): { type: 'blob' | 'tree'; oid: string } | null {
+function lookupAtPath(repo: Repo, treeOid: string, segments: string[]): { type: 'blob' | 'tree'; oid: string } | null {
   let oid = treeOid;
-  let mode = '40000';
   for (const segment of segments) {
     const object = lookupObject(repo, oid);
     if (!object || object.type !== 'tree') return null;
     const entry = parseTree(object.data).find((candidate) => candidate.name === segment);
     if (!entry) return null;
     oid = entry.oid;
-    mode = entry.mode;
   }
   const object = lookupObject(repo, oid);
   if (!object) return null;
@@ -168,7 +158,7 @@ function readPath(repo: Repo, treeOid: string, segments: string[]): { type: 'blo
 }
 
 /** Commit a tree on a branch, returning the new commit id. */
-function commitTree(repo: Repo, branch: string, treeOid: string, message: string): string {
+function commitOnBranch(repo: Repo, branch: string, treeOid: string, message: string): string {
   const parent = repo.refs.get(`refs/heads/${branch}`);
   const commit = buildCommit({ tree: treeOid, parents: parent ? [parent] : [], message });
   const oid = hashObject('commit', commit);
@@ -178,7 +168,7 @@ function commitTree(repo: Repo, branch: string, treeOid: string, message: string
 }
 
 /** Commits reachable from a tip, newest first. */
-function commitList(repo: Repo, tip: string): Array<{ sha: string; message: string }> {
+function listReachableCommits(repo: Repo, tip: string): Array<{ sha: string; message: string }> {
   const out: Array<{ sha: string; message: string }> = [];
   const seen = new Set<string>();
   const stack = [tip];
@@ -229,10 +219,10 @@ export function diffTrees(
       continue;
     }
     if (base === undefined) {
-      const additions = blobLineCount(repo, head!.oid);
+      const additions = countBlobLines(repo, head!.oid);
       out.push({ filename: path, status: 'added', additions, deletions: 0, changes: additions });
     } else if (head === undefined) {
-      const deletions = blobLineCount(repo, base.oid);
+      const deletions = countBlobLines(repo, base.oid);
       out.push({ filename: path, status: 'removed', additions: 0, deletions, changes: deletions });
     } else if (base.oid !== head.oid) {
       const oldLines = blobLines(repo, base.oid);
@@ -254,7 +244,7 @@ function blobLines(repo: Repo, oid: string): string[] {
   return object.data.toString('utf8').split('\n');
 }
 
-function blobLineCount(repo: Repo, oid: string): number {
+function countBlobLines(repo: Repo, oid: string): number {
   const lines = blobLines(repo, oid);
   return Math.max(1, lines.length);
 }
@@ -448,7 +438,7 @@ function listCommits(repo: Repo, query: URLSearchParams): Reply {
   const branch = ref ?? repo.defaultBranch;
   const tip = repo.refs.get(`refs/heads/${branch}`);
   if (tip === undefined) return jsonReply(200, []);
-  const commits = commitList(repo, tip);
+  const commits = listReachableCommits(repo, tip);
   return jsonReply(200, commits.map((commit) => ({ sha: commit.sha, commit: { message: commit.message } })));
 }
 
@@ -464,7 +454,7 @@ function handleContents(repo: Repo, method: string, contentPath: string, query: 
     if (tip === undefined) return errorReply(404, 'Not Found');
     const commit = lookupObject(repo, tip);
     if (!commit || commit.type !== 'commit') return errorReply(404, 'Not Found');
-    const found = readPath(repo, parseCommit(commit.data).tree, segments);
+    const found = lookupAtPath(repo, parseCommit(commit.data).tree, segments);
     if (found === null) return errorReply(404, 'Not Found');
     if (found.type === 'tree') {
       const entries = treeEntries(repo, found.oid);
@@ -501,15 +491,15 @@ function handleContents(repo: Repo, method: string, contentPath: string, query: 
     const branch = typeof parsed.branch === 'string' ? parsed.branch : repo.defaultBranch;
     const sha = typeof parsed.sha === 'string' ? parsed.sha : undefined;
     const tree = branchTree(repo, branch);
-    const existing = readPath(repo, tree, segments);
+    const existing = lookupAtPath(repo, tree, segments);
     if (sha !== undefined) {
       if (existing === null || existing.oid !== sha) return errorReply(409, 'sha does not match the current file');
     }
     const blobData = Buffer.from(contentB64, 'base64');
     const blobOid = hashObject('blob', blobData);
     putObject(repo, blobOid, { type: 'blob', data: blobData });
-    const newTree = setPath(repo, tree, segments, blobOid);
-    const commitOid = commitTree(repo, branch, newTree, message);
+    const newTree = putAtPath(repo, tree, segments, blobOid);
+    const commitOid = commitOnBranch(repo, branch, newTree, message);
     return jsonReply(sha !== undefined ? 200 : 201, {
       content: { sha: blobOid, encoding: 'base64' },
       commit: { sha: commitOid },
@@ -526,9 +516,9 @@ function handleContents(repo: Repo, method: string, contentPath: string, query: 
     const message = typeof parsed.message === 'string' ? parsed.message : 'delete';
     const branch = typeof parsed.branch === 'string' ? parsed.branch : repo.defaultBranch;
     const tree = branchTree(repo, branch);
-    const newTree = deletePath(repo, tree, segments);
+    const newTree = removeAtPath(repo, tree, segments);
     if (newTree === null) return errorReply(404, 'Not Found');
-    const commitOid = commitTree(repo, branch, newTree, message);
+    const commitOid = commitOnBranch(repo, branch, newTree, message);
     return jsonReply(200, { commit: { sha: commitOid } });
   }
 
