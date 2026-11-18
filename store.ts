@@ -1,8 +1,8 @@
-// store.ts — the forge's in-memory data model: repositories, refs, loose git objects, issues,
-// labels, pull requests and comments. Everything the REST, git, GraphQL and MCP layers share, so an
-// object created through one surface reads back through the others with the same ids.
+// store.ts — the forge's in-memory data model: repositories, refs, loose git objects, issues, labels,
+// pull requests and comments. Every surface (REST, git, GraphQL, MCP) reads and mutates this one
+// model, so an object written through one surface reads back through the others with the same ids.
 
-import { ZERO_OID, type GitObject } from './git.ts';
+import type { GitObject } from './git.ts';
 
 export interface Label {
   name: string;
@@ -95,7 +95,7 @@ export function reposForOwner(owner: string): Repo[] {
   return [...repos.values()].filter((repo) => repo.owner === owner);
 }
 
-/** The object a ref points at, or undefined when the ref (or object) is absent. */
+/** The object id a ref points at, or undefined when the ref is absent. */
 export function refTarget(repo: Repo, ref: string): string | undefined {
   return repo.refs.get(ref);
 }
@@ -112,19 +112,22 @@ export function lookupObject(repo: Repo, oid: string): GitObject | undefined {
   return repo.objects.get(oid);
 }
 
+/** Hand out the next id in a per-repo monotonic sequence. */
+function nextInSequence(repo: Repo, field: 'issueSeq' | 'pullSeq' | 'commentSeq'): number {
+  repo[field] += 1;
+  return repo[field];
+}
+
 export function nextIssueNumber(repo: Repo): number {
-  repo.issueSeq += 1;
-  return repo.issueSeq;
+  return nextInSequence(repo, 'issueSeq');
 }
 
 export function nextPullNumber(repo: Repo): number {
-  repo.pullSeq += 1;
-  return repo.pullSeq;
+  return nextInSequence(repo, 'pullSeq');
 }
 
 export function nextCommentId(repo: Repo): number {
-  repo.commentSeq += 1;
-  return repo.commentSeq;
+  return nextInSequence(repo, 'commentSeq');
 }
 
 // Fixed timestamps keep every response reproducible across runs; nothing in the state carries a clock.
